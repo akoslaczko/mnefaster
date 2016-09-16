@@ -168,7 +168,7 @@ params_bad_channels_in_epochs = [get_channel_var, get_channel_median_grad, get_c
 
 
 # Finding bad channels (Stage I.)
-def find_bad_channels(raw, montage, crit_z=crit_z, f_band=[4,30], ref_ch='E11', reset_ref=True, apply_filter=True, interpolate=True):
+def find_bad_channels(raw, mont, crit_z=crit_z, f_band=[4,30], ref_ch='E11', reset_ref=True, apply_filter=True, interpolate=True):
     eeg_chs = [raw.info['ch_names'][i] for i in mne.pick_types(raw.info, meg=False, eeg=True)]
     
     def set_custom_ref(raw):
@@ -206,7 +206,7 @@ def find_bad_channels(raw, montage, crit_z=crit_z, f_band=[4,30], ref_ch='E11', 
     
     corr_dict_parent, df_parent = get_corr_dict(raw) # Getting channel-correlation dictionary for Parameter 1 (passing 'df_parent' too)
     
-    def get_polar_angles(montage, ref_ch=ref_ch, eeg_chs=eeg_chs):
+    def get_polar_angles(mont, ref_ch=ref_ch, eeg_chs=eeg_chs):
         # Getting channel locations from montage
         df_mont = pd.DataFrame(mont.pos, index=mont.ch_names, columns=['X', 'Y', 'Z'])
         # Getting original polar angles
@@ -224,7 +224,7 @@ def find_bad_channels(raw, montage, crit_z=crit_z, f_band=[4,30], ref_ch='E11', 
         thetas = [np.arctan2(np.sqrt(ch[1]['X']**2 + ch[1]['Y']**2), ch[1]['Z']) for ch in rotated.iterrows() if ch[0] in eeg_chs]
         return thetas
     
-    thetas = get_polar_angles(montage)
+    thetas = get_polar_angles(mont)
     
     def initializer(): # Initializing Pool for multiprocessing
         global df, corr_dict # Setting up global variables for the child processes
