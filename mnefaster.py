@@ -311,7 +311,7 @@ def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f
     raw.plot(bad_color='red')
     
     # Interpolating bad channels (if chosen)
-    if interpolate == True:
+    if interpolate:
         raw.interpolate_bads(reset_bads=True)
     
     return raw, bads
@@ -373,7 +373,7 @@ def find_bad_epochs(raw, events, event_id, params=['ampl','dev','var'], crit_z=3
     bads = [i_epoch for i_epoch, z_epoch in enumerate(z_epochs) if any(abs(z) > crit_z for z in z_epoch)]
     
     # Plotting bad epochs
-    print 'Marked %i epochs for exclusion (FASTER):'%len(bads)
+    print 'Marked %i epoch outlier(s) for exclusion (FASTER):'%len(bads)
     print bads    
     
     # Dropping epoch outliers (if chosen)
@@ -474,7 +474,7 @@ def find_bad_components(epochs, ica, params=['eog_corr','spatial_kurt','mean_slo
     pool.join()
     
     # Plotting bad components
-    print 'Marked %i bad components for subtraction (FASTER):'%len(bads)
+    print 'Marked %i component outlier(s) for subtraction (FASTER):'%len(bads)
     print bads
     ica.plot_sources(epochs, exclude=[int(comp.replace('ICA ', '')) - 1 for comp in bads])
     
@@ -516,7 +516,7 @@ def find_bad_channels_in_epochs(epochs, params=['var','median_grad','ampl','dev'
     epochs_bads = []
     for i_epoch in set(epochs_data.index.get_level_values(level='epoch')):
         
-        # Getting data of single epoch
+        # Getting data of a single epoch
         data_parent = epochs_data.xs(i_epoch, level='epoch')
         
         # Finding channel outliers in single epochs
