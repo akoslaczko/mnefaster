@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Sep 14 13:51:08 2016
+FASTER
 """
+
+
+### Importing module dependencies ###
+
 import mne
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy import stats
 from scipy import signal
 from multiprocessing import Pool
 
 
+
+
 ### Hurst exponent function from 'eegfaster' ###
 
-# This is actually an exact translation of the author's matlab code, which supposed to be much faster than other "full-blown" implementation of the Hurst exponent.
-def hurst(x):
+def _hurst(x):
     """FASTER [Nolan2010]_ implementation of the Hurst Exponent.
     Parameters
     ----------
@@ -65,351 +70,469 @@ def hurst(x):
     logy = np.log(yvals)
 
     p2 = np.polyfit(logx, logy, 1)
+    
     return p2[0]
+    
 
 
 
+### Function to get correct polar angle distances from the reference electrode ###
 
+def _get_correct_thetas(mont, ref_ch, eeg_chs):
+    """Get correct angular distances from the reference electrode"""
+    # Getting default channel positions from montage
+    data_mont = pd.DataFrame(mont.pos, index=mont.ch_names, columns=['x', 'y', 'z'])
+    
+    # Getting the current polar angle of the reference electrode
+    theta_ref = np.arctan2(np.sqrt(data_mont.loc[ref_ch]['x']**2 + data_mont.loc[ref_ch]['y']**2), data_mont.loc[ref_ch]['z'])
+    
+    # Rotating the sensor-space to the correct position
+    theta_rot = (360 * np.pi / 180) - theta_ref
+    matrix_rot = np.array([[1,0,0], [0, np.cos(theta_rot), -np.sin(theta_rot)], [0, np.sin(theta_rot), np.cos(theta_rot)]])
+    
+    rotated = np.empty((0,3))
+    for ch in data_mont.iterrows():
+        rotated = np.vstack((rotated, np.array(np.dot(np.asarray(ch[1]), matrix_rot))))
+    rotated = pd.DataFrame(rotated, index=mont.ch_names, columns=['x', 'y', 'z'])
+    
+    # Getting the corrected polar angles
+    thetas = [np.arctan2(np.sqrt(ch[1]['x']**2 + ch[1]['y']**2), ch[1]['z']) for ch in rotated.iterrows() if ch[0] in eeg_chs]
+    
+    return thetas
+    
+    
+ 
 
-### FASTER ###
-
-# Default arguments
-crit_z = 3
-tmin = -0.5  # start of each epoch (500ms before the trigger)
-tmax = 1.5  # end of each epoch (1500ms after the trigger)
-baseline = (-0.2, 0)  # means from the first instant to t = - 200ms (as suggested by Nolan et al. (2010))
-
-
-# Functions for single parameters (multiprocessing.Pool.map() needs top level functions which are pickleable)
-def get_channels_corr(ch_pair, data=None):
-    if not data: data = df
-    chs_corr = stats.pearsonr(data[ch_pair[0]], data[ch_pair[1]])[0]
+### Functions for single parameters (multiprocessing.Pool.map() needs top level functions which are pickleable). ###
+    
+def _get_channels_corr(ch_pair, data=None):
+    """Get Pearson's correlation coefficient between two channels"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting the correlation coefficient (absolute)
+    chs_corr = abs(stats.pearsonr(data[ch_pair[0]], data[ch_pair[1]])[0])
     return (ch_pair, chs_corr)
 
-def get_channel_mcorr(ch, c_dict=None): # TODO: Quadratic correction for distance from reference electrode!
-    if not c_dict: c_dict = corr_dict
-    ch_mcorr = np.mean([c_dict[ch_pair] for ch_pair in c_dict.keys() if ch in ch_pair])
+def _get_channel_mcorr(ch, corr_dict=None):
+    """Get the mean correlation coefficient describing a given channel"""
+    # Picking up variables from the child process
+    if corr_dict is None:
+        corr_dict = corr_dict_child
+    # Getting the mean correlation coefficient
+    ch_mcorr = np.mean([corr_dict[ch_pair] for ch_pair in corr_dict.keys() if ch in ch_pair])
     return ch_mcorr
 
-def get_channel_var(ch, data=None): # TODO: Quadratic correction for distance from reference electrode!
-    if not data: data = df
+def _get_channel_var(ch, data=None):
+    """Get the variance describing a given channel"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting the variance
     ch_var = np.var(data[ch])
     return ch_var
                          
-def get_channel_hurst(ch, data=None):
-    if not data: data = df
-    ch_hurst = hurst(np.asarray(data[ch]))
+def _get_channel_hurst(ch, data=None):
+    """Get the Hurst exponent describing a given channel"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting the Hurst exponent
+    ch_hurst = _hurst(np.asarray(data[ch]))
     return ch_hurst
-
-def get_channel_ampl(ch, data=None):
-    if not data: data = df
+    
+def _get_channel_ampl(ch, data=None):
+    """Get the amplitude describing a given channel"""
+    # Picking up variables from the child process
+    if data is None: 
+        data = data_child
+    # Getting the amplitude
     ch_ampl = max(data[ch]) - min(data[ch])
     return ch_ampl
 
-def get_channel_dev(ch, data=None, mean=None):
-    if not data: data = df
-    if not mean: mean = ch_means[ch]
-    ch_dev = mean - np.mean(data[ch])
-    return ch_dev
+def _get_channel_dev(ch, data=None, means=None):
+    """Get the deviance describing a given channel"""
+    # Picking up variables from the child process
+    if data is None: 
+        data = data_child
+    if means is None: 
+        means = means_child
+    # Getting the deviance (absolute)
+    ch_dev = abs(means[ch] - np.mean(data[ch]))
+    return ch_dev   
 
-def get_channel_median_grad(comp, data=None): #NEW
-    if not data: data = df
-    ch_med_grad = np.median(np.diff(data[comp])) 
-    # median(diff(EEG.icaact(u,:)))
+def _get_channel_median_grad(ch, data=None):
+    """Get the median gradient describing a given channel"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting the median gradient
+    ch_med_grad = np.median(np.diff(data[ch])) 
     return ch_med_grad
 
-def get_component_eog_corr(comp, data=None, misc=None, misc_data=None):
-    if not data: data = df_ica
-    if not misc: misc = misc_chs
-    if not misc_data: misc_data = df_epochs
+def _get_component_eog_corr(comp, data=None, misc=None, misc_data=None):
+    """Get the maximum correlation coefficient with EOG channels describing a given ICA component"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    if misc is None:
+        misc = misc_child
+    if misc_data is None:
+        misc_data = misc_data_child
+    # Getting the maximum EOG correlation coefficient
     c_max_eog = max([abs(stats.pearsonr(data[comp], misc_data[ch])[0]) for ch in misc])
     return c_max_eog
 
-def get_component_spatial_kurt(comp, data=None):
-    if not data: data = df_map
-    c_kurt = stats.kurtosis(data[comp])
-    # kurt(EEG.icawinv(:,u))
+def _get_component_spatial_kurt(comp, maps=None):
+    """Get the spatial kurtosis describing a given ICA component"""
+    # Picking up variables from the child process
+    if maps is None:
+        maps = maps_child
+    # Getting the spatial kurtosis
+    c_kurt = stats.kurtosis(maps[comp])
     return c_kurt
 
-def get_component_mean_slope(comp, data=None, band=None):
-    if not data: data = df_ica
-    if not band: band = f_band
-    freqs, spectra = signal.welch(data[comp], window='hamming', fs=1000)
+def _get_component_mean_slope(comp, data=None, band=None):
+    """Get the mean slope in the frequency band describing a given ICA component"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    if band is None:
+        band = band_child
+    # Getting the mean slope in the frequency band
+    freqs, spectra = signal.welch(data[comp], window='hamming', fs=1000) # TODO inherit fs from a higher level object
     c_mean_slope = np.mean(np.diff(10*np.log10([spectra[i] for i, f in enumerate(freqs) if f > band[0] and f < band[1]])))
-    # pwelch(x,window,noverlap,f,fs) returns the two-sided Welch PSD estimates at the frequencies specified in the vector, f. The vector, f, must contain at least 2 elements. The frequencies in f are in cycles per unit time. The sampling frequency, fs, is the number of samples per unit time. If the unit of time is seconds, then f is in cycles/sec (Hz).
-    # [spectra(u,:) freqs] = pwelch(EEG.icaact(u,:),[],[],(EEG.srate),EEG.srate)
-    # mean(diff(10*log10(spectra(u,find(freqs>=lpf_band(1),1):find(freqs<=lpf_band(2),1,'last')))))
     return c_mean_slope
 
-def get_component_hurst(comp, data=None):
-    if not data: data = df_ica
-    c_hurst = hurst(np.asarray(data[comp]))
+def _get_component_hurst(comp, data=None):
+    """Get the Hurst exponent describing a given ICA component"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting Hurst exponent
+    c_hurst = _hurst(np.asarray(data[comp]))
     return c_hurst
 
-def get_component_median_grad(comp, data=None):
-    if not data: data = df_ica
+def _get_component_median_grad(comp, data=None):
+    """Get the median gradient describing a given ICA component"""
+    # Picking up variables from the child process
+    if data is None:
+        data = data_child
+    # Getting the median gradient
     c_med_grad = np.median(np.diff(data[comp])) 
-    # median(diff(EEG.icaact(u,:)))
     return c_med_grad
 
 
 
 
-# Defining parameter-lists for stages
-params_bad_channels = [get_channel_mcorr, get_channel_var, get_channel_hurst] # Parameters 1, 2, & 3 [Stage I.] (Nolan et al., 2010)
 
-params_bad_epochs = [get_channel_ampl, get_channel_dev, get_channel_var] # Parameters 4, 5, & 6 [Stage II.] (Nolan et al., 2010)
+  
+##### The actual stages of FASTER #####    
+    
+### Finding bad channels in raw data (Stage I.) ###
 
-params_bad_components = [get_component_eog_corr, get_component_spatial_kurt, get_component_mean_slope, get_component_hurst, get_component_median_grad] # Parameters 7, 8, 9, 10 & 11 [Stage III.] (Nolan et al., 2010)
-
-params_bad_channels_in_epochs = [get_channel_var, get_channel_median_grad, get_channel_ampl, get_channel_dev] # Parameters 12, 13, 14, & 15 [Stage IV.] (Nolan et al., 2010)
-
-
-
-
-# Finding bad channels (Stage I.)
-def find_bad_channels(raw, mont, crit_z=crit_z, f_band=[4,30], ref_ch='E11', reset_ref=True, apply_filter=True, interpolate=True):
+def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f_band=(4,30), ref_ch='E11', reset_ref=True, apply_filter=True, interpolate=True):
+    
+    # Getting requested parameters
+    funcs = []
+    if 'mean_corr' in params:
+        funcs.append(_get_channel_mcorr)
+    if 'var' in params:
+        funcs.append(_get_channel_var)
+    if 'hurst' in params:
+        funcs.append(_get_channel_hurst)
+    
+    # Getting the names of EEG channels
     eeg_chs = [raw.info['ch_names'][i] for i in mne.pick_types(raw.info, meg=False, eeg=True)]
     
-    def set_custom_ref(raw):
+    # Getting data from the mne.io.Raw object
+    data_parent = raw.to_data_frame()
+    
+    # Setting the Fz electrode as reference (if chosen)    
+    if reset_ref:
         raw.load_data()
         raw, _ = mne.io.set_eeg_reference(raw, [ref_ch])
         raw.set_channel_types({ref_ch:'misc'})
-        return raw
-        
-    if reset_ref == True:
-        raw = set_custom_ref(raw)
     
-    def filter_data(raw):
-        raw.load_data()
+    # Applying band-pass filter (if chosen)
+    if apply_filter:
+        raw.load_data() # TODO: check whether this is necessary 
         raw.filter(f_band[0], f_band[1])
         raw.plot_psd(area_mode='range', fmax=f_band[1]+10 , picks=mne.pick_types(raw.info, meg=False, eeg=True))
-        return raw
     
-    if apply_filter == True:
-        raw = filter_data(raw)
-    
-    def get_corr_dict(raw):
-        ch_pairs = [] # Getting all possible channel pairings
+    # Getting channel correlations for Parameter 1.
+    if 'mean_corr' in params:
+        # Getting all possible channel pairings
+        ch_pairs = []
         for ch_x in eeg_chs:
             ch_pairs += [(ch_x, ch_y) for ch_y in eeg_chs if ch_x != ch_y and (ch_y, ch_x) not in ch_pairs]
-        df_parent = raw.to_data_frame()
-        def initializer(): # Initializing Pool for multiprocessing
-            global df # Setting up global variables for the child processes
-            df = df_parent
+            
+        # Getting correlation coefficients
+        def initializer(): # Passing necessary variables to the child processes
+            global data_child
+            data_child = data_parent
         pool = Pool(None, initializer, ())
-        corr_dict = dict(pool.map(get_channels_corr, ch_pairs)) # Getting all possible channel-correlations
+        corr_dict_parent = dict(pool.map(_get_channels_corr, ch_pairs))
         # Closing Pool
         pool.close()
         pool.join()
-        return corr_dict, df_parent
     
-    corr_dict_parent, df_parent = get_corr_dict(raw) # Getting channel-correlation dictionary for Parameter 1 (passing 'df_parent' too)
+    # Getting correct polar angles from the reference electrode
+    thetas = _get_correct_thetas(mont, ref_ch, eeg_chs)
     
-    def get_polar_angles(mont, ref_ch=ref_ch, eeg_chs=eeg_chs):
-        # Getting channel locations from montage
-        df_mont = pd.DataFrame(mont.pos, index=mont.ch_names, columns=['X', 'Y', 'Z'])
-        # Getting original polar angles
-        thetas = pd.DataFrame([np.arctan2(np.sqrt(ch[1]['X']**2 + ch[1]['Y']**2), ch[1]['Z']) for ch in df_mont.iterrows()], index=mont.ch_names, columns=['theta'])
-        # Rotating the sensor-space to match the vertex and the origo->ref_channel vector
-        theta_rot = (360 * np.pi / 180) - thetas.loc[ref_ch]['theta']
-        mat_rot = np.array([[1,0,0], [0, np.cos(theta_rot), -np.sin(theta_rot)], [0, np.sin(theta_rot), np.cos(theta_rot)]])
-    
-        rotated = np.empty((0,3))
-        for ch in df_mont.iterrows():
-            rotated = np.vstack((rotated, np.array(np.dot(np.asarray(ch[1]), mat_rot))))
-        rotated = pd.DataFrame(rotated, index=mont.ch_names, columns=['X', 'Y', 'Z'])
-    
-        # Getting corrected polar angles
-        thetas = [np.arctan2(np.sqrt(ch[1]['X']**2 + ch[1]['Y']**2), ch[1]['Z']) for ch in rotated.iterrows() if ch[0] in eeg_chs]
-        return thetas
-    
-    thetas = get_polar_angles(mont)
-    
-    def initializer(): # Initializing Pool for multiprocessing
-        global df, corr_dict # Setting up global variables for the child processes
-        df = df_parent
-        corr_dict = corr_dict_parent
+    # Finding channel outliers in raw data
+    def initializer(): # Passing necessary variables to the child processes
+        global data_child, corr_dict_child
+        data_child = data_parent
+        corr_dict_child = corr_dict_parent
     pool = Pool(None, initializer, ())
-    # Computing parameters
+    
+    # Defining channel outliers based on critical z-score
     bads = []
-    for param in params_bad_channels:
-        if param == get_channel_mcorr or param == get_channel_var:
-            values = pool.map(param, eeg_chs)
-            # Quadratic correction for distance from reference electrode
+    for func in funcs:
+        if func == _get_channel_mcorr or func == _get_channel_var:
+            values = pool.map(func, eeg_chs)
+            # Quadratic correction for distance from reference electrode (in case of mean channel correlation and variance)
             p = np.polyfit(thetas, values, 2)
             fitcurve = np.polyval(p, thetas)
-            z_channels = stats.zscore(values - fitcurve)
+            z_chs = stats.zscore(values - fitcurve)
         else:
-            z_channels = stats.zscore(pool.map(param, eeg_chs))
-        # Defining channel outliers
-        bads += [eeg_chs[i_ch] for i_ch, z_ch in enumerate(z_channels) if abs(z_ch) > crit_z and eeg_chs[i_ch] not in bads]
+            z_chs = stats.zscore(pool.map(func, eeg_chs))
+        bads += [eeg_chs[i_ch] for i_ch, z_ch in enumerate(z_chs) if abs(z_ch) > crit_z and eeg_chs[i_ch] not in bads]
+    
     # Closing Pool
     pool.close()
     pool.join()
     
     # Plot bad channels
-    print 'Interploating %i bad channels (FASTER):' %len(bads)
+    print 'Marked %i channel outlier(s) for interpolation (FASTER):' %len(bads)
     print bads
     raw.info['bads'] = bads
     raw.plot(bad_color='red')
     
+    # Interpolating bad channels (if chosen)
     if interpolate == True:
         raw.interpolate_bads(reset_bads=True)
     
     return raw, bads
+    
+    
 
+    
+    
+### Finding bad epochs (Stage II.) ###
 
-
-
-
-# Finding bad epochs (Stage II.)
-def find_bad_epochs(raw, events, event_id, crit_z=crit_z, tmin=tmin, tmax=tmax, baseline=baseline, drop=True):
+def find_bad_epochs(raw, events, event_id, params=['ampl','dev','var'], crit_z=3, tmin=-0.5, tmax=1.5, baseline=(-0.2,0), drop=True):
+    
+    # Getting requested parameters
+    funcs = []
+    if 'ampl' in params:
+        funcs.append(_get_channel_ampl)
+    if 'dev' in params:
+        funcs.append(_get_channel_dev)
+    if 'var' in params:
+        funcs.append(_get_channel_var)
+    
+    # Getting the names of EEG channels
     eeg_chs = [raw.info['ch_names'][i] for i in mne.pick_types(raw.info, meg=False, eeg=True)]
     
-    epochs = mne.Epochs(raw, events, event_id, tmin, tmax, baseline=baseline, picks=mne.pick_types(raw.info, meg=False, eeg=True, misc=True)).drop_bad() # Creating Epochs object from Raw
+    # Creating Epochs object from Raw
+    epochs = mne.Epochs(raw, events, event_id, tmin, tmax, baseline=baseline, picks=mne.pick_types(raw.info, meg=False, eeg=True, misc=True)).drop_bad()
 
-    df_epochs = epochs.to_data_frame() # Get epochs data
-    ch_means_parent = pd.DataFrame([np.mean(df_epochs[ch]) for ch in eeg_chs], index=eeg_chs).transpose() # Get channel means across epochs for Parameter 5
+    # Getting epochs data
+    epochs_data = epochs.to_data_frame()
+    
+    # Getting channel means across epochs for Parameter 5.
+    means_parent = pd.DataFrame([np.mean(epochs_data[ch]) for ch in eeg_chs], index=eeg_chs).transpose()
     
     # Iterating over epochs
-    values_epochs = np.empty((0,3))
-    for i_epoch in set(df_epochs.index.get_level_values(level='epoch')):
-        df_parent = df_epochs.xs(i_epoch, level='epoch')
-        def initializer(): # Initializing Pool for multiprocessing
-            global df, ch_means # Setting up global variables for the child processes
-            df = df_parent
-            ch_means = ch_means_parent
+    epochs_values = np.empty((0,3))
+    for i_epoch in set(epochs_data.index.get_level_values(level='epoch')):
+        
+        # Getting data of single epoch
+        data_parent = epochs_data.xs(i_epoch, level='epoch')
+        
+        # Computing all parameters for current epoch
+        def initializer(): # Passing necessary variables to the child processes
+            global data_child, means_child
+            data_child = data_parent
+            means_child = means_parent
         pool = Pool(None, initializer, ())
-        # Computing parameters for each epoch
+        
         values = []
-        for param in params_bad_epochs:        
-            values.append(np.mean(pool.map(param, eeg_chs)))
-        values_epochs = np.vstack([values_epochs, np.asarray([values])])
+        for func in funcs:        
+            values.append(np.mean(pool.map(func, eeg_chs)))
+        epochs_values = np.vstack([epochs_values, np.asarray([values])])
+        
         # Closing Pool   
         pool.close()
         pool.join()
     
-    # Defining epoch outliers   
-    z_epochs = stats.zscore(values_epochs)        
+    # Defining outlier epochs based on critical z-score
+    z_epochs = stats.zscore(epochs_values)        
     bads = [i_epoch for i_epoch, z_epoch in enumerate(z_epochs) if any(abs(z) > crit_z for z in z_epoch)]
     
-    # Dropping epoch outliers (optional)
-    if drop == True:
-        print 'Dropping %i epochs (FASTER):'%len(bads)
-        print bads
+    # Plotting bad epochs
+    print 'Marked %i epochs for exclusion (FASTER):'%len(bads)
+    print bads    
+    
+    # Dropping epoch outliers (if chosen)
+    if drop:
         epochs.drop(bads)
     
     return epochs, bads
+    
 
 
 
+### Fitting ICA with predefined parameters ###
 
-
-# Fitting ICA with predefined parameters (Nolan et al., 2010)
 def fit_ica(epochs, n_interpolated, ref_ch='E11', method='infomax', reset_ref=True):
     
+    # Getting the names of EEG channels
     eeg_chs = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, eeg=True)]
+    # Getting the names of misc channels
     misc_chs = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, misc=True)]
     
-    if reset_ref == True: # Setting average as reference if epochs is still Fz-referenced (default)
+    # Setting average as reference if epochs is still Fz-referenced (if chosen)
+    if reset_ref == True:
         epochs.load_data()
-        #epochs, _ = mne.io.set_eeg_reference(epochs, []) # Deactivating Fz reference projection (not sure whether this is is necessary)
-        epochs, _ = mne.io.set_eeg_reference(epochs, eeg_chs) # Applying average reference projection (the built in method uses the eog channels as well?! Using eeg channels only for computing average reference...)
+        epochs, _ = mne.io.set_eeg_reference(epochs, eeg_chs)
         
-        
-    for ch in misc_chs: # Temporarily setting misc channels as EEG to include them in the ICA
+    # Temporarily setting misc channels as EEG to include them in the ICA   
+    for ch in misc_chs: 
         epochs.set_channel_types({ch:'eeg'}) 
         
-    c_pca = int(min(np.floor(np.sqrt(len(epochs.to_data_frame().index)/25)), epochs.info['nchan'] - n_interpolated)) # Defining the correct number of PCA components (see Nolan et al. (2010))
+    # Defining the correct number of PCA components   
+    c_pca = int(min(np.floor(np.sqrt(len(epochs.to_data_frame().index)/25)), epochs.info['nchan'] - n_interpolated))
     
     # Running ICA with the chosen method
     ica = mne.preprocessing.ICA(method=method, n_components=c_pca-1, max_pca_components=c_pca)
     ica.fit(epochs)
-        
-    for ch in misc_chs: # Re-setting misc channels
+     
+    # Resetting the misc channels
+    for ch in misc_chs: 
         epochs.set_channel_types({ch:'misc'})
         
-    return ica, epochs
+    return epochs, ica
 
 
 
-# Finding bad components (Stage III.)
-def find_bad_components(ica, epochs, crit_z=crit_z, subtract=True):
+
+
+
+### Finding bad components (Stage III.) ###
+
+def find_bad_components(epochs, ica, params=['eog_corr','spatial_kurt','mean_slope','hurst','median_grad'], crit_z=3, subtract=True):
     
-    df_ica_parent = ica.get_sources(epochs).to_data_frame()
-    ica_comps = df_ica_parent.columns.values
+    # Getting requested parameters
+    funcs = []
+    if 'eog_corr' in params:
+        funcs.append(_get_component_eog_corr)
+    if 'spatial_kurt' in params:
+        funcs.append(_get_component_spatial_kurt)
+    if 'mean_slope' in params:
+        funcs.append(_get_component_mean_slope)
+    if 'hurst' in params:
+        funcs.append(_get_component_hurst)
+    if 'median_grad' in params:
+        funcs.append(_get_component_median_grad)
+
+    # Getting the names of misc channels
+    misc_parent = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, misc=True)]
     
-    def get_ica_map(ica, components=None): # Function suggested by jona-sassenhagen
-        """Get ICA topomap for components"""
-        if components is None:
-            components = list(range(ica.n_components_))
-        maps = np.dot(ica.mixing_matrix_[:, components].T, ica.pca_components_[:ica.n_components_])
-        # EEG.icawinv = pinv(EEG.icaweights*EEG.icasphere);
-        return maps
+    # Getting temporal data of ICA components
+    data_parent = ica.get_sources(epochs).to_data_frame()
     
-    df_map_parent = pd.DataFrame(get_ica_map(ica), index=ica_comps).transpose() #TODO check if this is the correct way
-    df_epochs_parent = epochs.to_data_frame()
-    misc_chs_parent = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, misc=True)]
+    # Getting the names of ICA components
+    comps = data_parent.columns.values
     
-    def initializer(): # Initializing Pool for multiprocessing
-        global df_ica, df_map, df_epochs, f_band, misc_chs # Setting up global variables for the child processes
-        df_ica = df_ica_parent
-        df_map = df_map_parent
-        df_epochs = df_epochs_parent
-        misc_chs = misc_chs_parent
-        f_band = (epochs.info['highpass'], epochs.info['lowpass'])
-        
+    # Getting spatial data of ICA components (jona-sassenhagen)
+    maps_parent = pd.DataFrame(np.dot(ica.mixing_matrix_[:, list(range(ica.n_components_))].T, ica.pca_components_[:ica.n_components_]), index=comps).transpose()
+
+    # Getting epochs data (for EOG correlations)
+    misc_data_parent = epochs.to_data_frame()
+    
+    # Finding component outliers
+    def initializer(): # Passing necessary variables to the child processes
+        global data_child, maps_child, misc_child, misc_data_child, band_child
+        data_child = data_parent
+        maps_child = maps_parent
+        misc_child = misc_parent
+        misc_data_child = misc_data_parent
+        band_child = (epochs.info['highpass'], epochs.info['lowpass'])   
     pool = Pool(None, initializer, ())
-    # Computing parameters
+    
+    # Defining component outliers based on critical z-score
     bads = []
-    for param in params_bad_components:
-        z_comps = stats.zscore(pool.map(param, ica_comps))
-        # Defining component outliers
-        bads += [ica_comps[i_comp] for i_comp, z_comp in enumerate(z_comps) if abs(z_comp) > crit_z and ica_comps[i_comp] not in bads]
+    for func in funcs:
+        z_comps = stats.zscore(pool.map(func, comps))
+        bads += [comps[i_comp] for i_comp, z_comp in enumerate(z_comps) if abs(z_comp) > crit_z and comps[i_comp] not in bads]
         
     # Closing Pool
     pool.close()
     pool.join()
     
-    # Plot components
-    bads_index = [int(comp.replace('ICA ', '')) - 1 for comp in bads]
-    ica.plot_sources(epochs, exclude=bads_index)
+    # Plotting bad components
+    print 'Marked %i bad components for subtraction (FASTER):'%len(bads)
+    print bads
+    ica.plot_sources(epochs, exclude=[int(comp.replace('ICA ', '')) - 1 for comp in bads])
     
-    # Subtracting bad components
-    if subtract == True:
-        print 'Subtracting %i bad components (FASTER):'%len(bads)
-        print bads
-        ica.apply(epochs, exclude=bads_index)
+    # Subtracting bad components (if chosen)
+    if subtract:
+        ica.apply(epochs, exclude=[int(comp.replace('ICA ', '')) - 1 for comp in bads])
     
     return epochs, bads
 
 
 
 
-# Finding bad channels in epochs (Stage IV.)
-def find_bad_channels_in_epochs(epochs, crit_z=crit_z, interpolate=True):
+
+### Finding bad channels in single epochs (Stage IV.) ###
+
+def find_bad_channels_in_epochs(epochs, params=['var','median_grad','ampl','dev'], crit_z=3, interpolate=True):
     
+    # Getting requested parameters
+    funcs = []
+    if 'var' in params:
+        funcs.append(_get_channel_var)
+    if 'median_grad' in params:
+        funcs.append(_get_channel_median_grad)
+    if 'ampl' in params:
+        funcs.append(_get_channel_ampl)
+    if 'dev' in params:
+        funcs.append(_get_channel_dev)
+
+    # Getting the names of EEG channels
     eeg_chs = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, eeg=True)]
-    df_epochs = epochs.to_data_frame() # Get epochs data
-    ch_means_parent = pd.DataFrame([np.mean(df_epochs[ch]) for ch in eeg_chs], index=eeg_chs).transpose() # Get channel means across epochs for Parameter 5
+    
+    # Getting epochs data
+    epochs_data = epochs.to_data_frame()
+    
+    # Getting channel means across epochs for Parameter 15.
+    means_parent = pd.DataFrame([np.mean(epochs_data[ch]) for ch in eeg_chs], index=eeg_chs).transpose() 
     
     # Iterating over epochs
-    bads_in_epochs = []
-    for i_epoch in set(df_epochs.index.get_level_values(level='epoch')):
-        df_parent = df_epochs.xs(i_epoch, level='epoch')
-        def initializer(): # Initializing Pool for multiprocessing
-            global df, ch_means # Setting up global variables for the child processes
-            df = df_parent
-            ch_means = ch_means_parent
+    epochs_bads = []
+    for i_epoch in set(epochs_data.index.get_level_values(level='epoch')):
+        
+        # Getting data of single epoch
+        data_parent = epochs_data.xs(i_epoch, level='epoch')
+        
+        # Finding channel outliers in single epochs
+        def initializer():# Passing necessary variables to the child processes
+            global data_child, means_child
+            data_child = data_parent
+            means_child = means_parent
         pool = Pool(None, initializer, ())
-        # Computing parameters for each epoch
+        
+        # Defining channel outliers based on critical z-score
         bads = []
-        for param in params_bad_channels_in_epochs:
-            z_channels = stats.zscore(pool.map(param, eeg_chs))
-            # Defining channel outliers in each epoch
-            bads += [eeg_chs[i_ch] for i_ch, z_ch in enumerate(z_channels) if abs(z_ch) > crit_z and eeg_chs[i_ch] not in bads]
-        bads_in_epochs.append(bads)
+        for func in funcs:
+            z_chs = stats.zscore(pool.map(func, eeg_chs))
+            bads += [eeg_chs[i_ch] for i_ch, z_ch in enumerate(z_chs) if abs(z_ch) > crit_z and eeg_chs[i_ch] not in bads]
+        epochs_bads.append(bads)
+        
         # Closing Pool   
         pool.close()
         pool.join()
@@ -417,10 +540,10 @@ def find_bad_channels_in_epochs(epochs, crit_z=crit_z, interpolate=True):
     # Interpolating bad channels in single epochs (if chosen)
     evoked = []
     for i, ev in enumerate(epochs.iter_evoked()):
-        ev.info['bads'] = bads_in_epochs[i]
-        if interpolate == True:
-            ev.interpolate_bads()
+        ev.info['bads'] = epochs_bads[i]
+        if interpolate:
+            ev.interpolate_bads(reset_bads=True)
         evoked.append(ev)
     evoked = mne.combine_evoked(evoked, weights='equal')
         
-    return evoked, bads_in_epochs
+    return evoked, epochs_bads
