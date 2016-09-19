@@ -1,5 +1,5 @@
 # mnefaster
-An extension for the MNE-Python repository (Gramfort et al., 2013) implementing the FASTER method (Nolan, Whelan, & Reilly, 2010)
+An extension for the MNE-Python repository (Gramfort et al., 2013) implementing the FASTER method (Nolan, Whelan, & Reilly, 2010).
 
 ## Usage
 See mnefaster_usage.ipynb
