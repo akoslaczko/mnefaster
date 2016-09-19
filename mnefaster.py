@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-FASTER
+An extension for the MNE-Python repository (Gramfort et al., 2013) implementing the FASTER method (Nolan, Whelan, & Reilly, 2010)
+
+References:
+-----------
+    Gramfort, A., Luessi, M., Larson, E., Engemann, D., Strohmeier, D., Brodbeck, C., Goj, R., Jas, M., Brooks, T., Parkkonen, L., & Hämäläinen, M. (2013). MEG and EEG data analysis with MNE-Python. Frontiers in Neuroscience, 7.
+
+    Nolan, H., Whelan, R., & Reilly, R. (2010). FASTER: Fully Automated Statistical Thresholding for EEG artifact Rejection. Journal Of Neuroscience Methods, 192(1), 152-162.    
 """
 
 
@@ -19,22 +25,18 @@ from multiprocessing import Pool
 ### Hurst exponent function from 'eegfaster' ###
 
 def _hurst(x):
-    """FASTER [Nolan2010]_ implementation of the Hurst Exponent.
+    """
+    FASTER implementation of the Hurst Exponent.
+    
     Parameters
     ----------
-    x : numpy.ndarray
+    x:  numpy.ndarray
         Vector with the data sequence.
+    
     Returns
     -------
-    h : float
-        Computed hurst exponent
-    #-SPHINX-IGNORE-#
-    References
-    ----------
-    [Nolan2010] H. Nolan, R. Whelan, and R.B. Reilly. Faster: Fully automated
-    statistical thresholding for eeg artifact rejection. Journal of
-    Neuroscience Methods, 192(1):152-162, 2010.
-    #-SPHINX-IGNORE-#
+    h:  float
+        Computed Hurst-exponent.
     """
 
     # Get a copy of the data
@@ -231,8 +233,41 @@ def _get_component_median_grad(comp, data=None):
     
 ### Finding bad channels in raw data (Stage I.) ###
 
-def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f_band=(4,30), ref_ch='E11', reset_ref=True, apply_filter=True, interpolate=True):
+def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3.0, ref_ch='E11', apply_ref=True, f_band=(4,30), apply_filt=True, interpolate=True):
+    """
+    Implements the first stage of FASTER: finds the channel outliers in the raw data.
     
+    Parameters
+    ----------
+    raw:        mne.io.Raw
+                The raw data.
+    mont:       mne.channels.Montage
+                The montage containing the electrode locations.
+    params:     list
+                The parameters to use. Default is to use them all.
+                    'mean_corr':    The corrected mean correlation coefficient describing a given channel (Parameter 1.)
+                    'var':          The corrected variance describing a given channel (Parameter 2.)
+                    'hurst':        The corrected Hurst-exponent describing a given channel (Parameter 3.)
+    crit_z:     float
+                The critical z-score to use when determining outliers. Defaults to 3.0.
+    ref_ch:     string
+                The label of the reference electrode. Defaults to 'E11' (the Fz equivalent electrode of the GSN-Hydrocel-128 caps).
+    apply_ref:  boolean
+                Whether to apply custom reference using 'ref_ch'. Defaults to True.
+    f_band:     tuple
+                The low-pass and high-pass values [Hz] to use when filtering the raw data. Defaults to (4,30).
+    apply_filt: boolean
+                Whether to apply a bandpass filter using 'f_band'). Defaults to True.
+    interpolate:boolean
+                Whether to modify 'raw' by interpolating the channels marked as outliers. Defaults to True.
+    
+    Returns
+    -------
+    raw:    mne.io.Raw
+            The raw data (modified or unmodified).
+    bads:   list
+            The labels of the channels marked as outliers.
+    """
     # Getting requested parameters
     funcs = []
     if 'mean_corr' in params:
@@ -249,13 +284,13 @@ def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f
     data_parent = raw.to_data_frame()
     
     # Setting the Fz electrode as reference (if chosen)    
-    if reset_ref:
+    if apply_ref:
         raw.load_data()
         raw, _ = mne.io.set_eeg_reference(raw, [ref_ch])
         raw.set_channel_types({ref_ch:'misc'})
     
     # Applying band-pass filter (if chosen)
-    if apply_filter:
+    if apply_filt:
         raw.load_data() # TODO: check whether this is necessary 
         raw.filter(f_band[0], f_band[1])
         raw.plot_psd(area_mode='range', fmax=f_band[1]+10 , picks=mne.pick_types(raw.info, meg=False, eeg=True))
@@ -272,7 +307,9 @@ def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f
             global data_child
             data_child = data_parent
         pool = Pool(None, initializer, ())
+        
         corr_dict_parent = dict(pool.map(_get_channels_corr, ch_pairs))
+        
         # Closing Pool
         pool.close()
         pool.join()
@@ -290,14 +327,12 @@ def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f
     # Defining channel outliers based on critical z-score
     bads = []
     for func in funcs:
-        if func == _get_channel_mcorr or func == _get_channel_var:
-            values = pool.map(func, eeg_chs)
-            # Quadratic correction for distance from reference electrode (in case of mean channel correlation and variance)
-            p = np.polyfit(thetas, values, 2)
-            fitcurve = np.polyval(p, thetas)
-            z_chs = stats.zscore(values - fitcurve)
-        else:
-            z_chs = stats.zscore(pool.map(func, eeg_chs))
+        values = pool.map(func, eeg_chs)
+        # Quadratic correction for distance from reference electrode (in case of mean channel correlation and variance)
+        p = np.polyfit(thetas, values, 2)
+        fitcurve = np.polyval(p, thetas)
+        z_chs = stats.zscore(values - fitcurve)
+        
         bads += [eeg_chs[i_ch] for i_ch, z_ch in enumerate(z_chs) if abs(z_ch) > crit_z and eeg_chs[i_ch] not in bads]
     
     # Closing Pool
@@ -322,8 +357,41 @@ def find_bad_channels(raw, mont, params=['mean_corr','var','hurst'], crit_z=3, f
     
 ### Finding bad epochs (Stage II.) ###
 
-def find_bad_epochs(raw, events, event_id, params=['ampl','dev','var'], crit_z=3, tmin=-0.5, tmax=1.5, baseline=(-0.2,0), drop=True):
+def find_bad_epochs(raw, events, event_id, params=['ampl','dev','var'], crit_z=3.0, tmin=-0.5, tmax=1.5, baseline=(-0.2,0), drop=True):
+    """
+    Implements the second step of FASTER: finds the epoch outliers in the epoched data.
     
+    Parameters
+    ----------
+    raw:        mne.io.Raw
+                The raw data. Preferably returned by mnefaster.find_bad_channels().
+    events:     numpy.array
+                The events to use when epoching the raw data. Preferably returned by mne.find_events().
+    event_id:   list
+                The types of events to use when epoching the raw data.
+    params:     list
+                The parameters to use. Default is to use them all.
+                    'ampl': The mean of maximum channel amplitudes describing a given epoch (Parameter 3.)
+                    'dev':  The mean of absolute channel deviations describing a given epoch (Parameter 4.)
+                    'var':  The mean of channel variances describing a given epoch (Parameter 5.)
+    crit_z:     float
+                The critical z-score to use when determining outliers. Defaults to 3.0.
+    t_min:      float
+                The starting point of the epochs relative to the events. Defaults to -0.5.
+    t_max:      float
+                The end point of the epochs relative to the events. Defaults to 1.5.
+    baseline:   tuple
+                The low-pass and high-pass values [Hz] to use when filtering the raw data. Defaults to (4,30).
+    drop:       boolean
+                Whether to modify 'epochs' by excluding the epochs marked as outliers. Defaults to True.
+                
+    Returns
+    -------
+    epochs: mne.io.Epochs
+            The epoched data (modified or unmodified).
+    bads:   list
+            The indices of the epochs marked as outliers.
+    """
     # Getting requested parameters
     funcs = []
     if 'ampl' in params:
@@ -387,15 +455,35 @@ def find_bad_epochs(raw, events, event_id, params=['ampl','dev','var'], crit_z=3
 
 ### Fitting ICA with predefined parameters ###
 
-def fit_ica(epochs, n_interpolated, ref_ch='E11', method='infomax', reset_ref=True):
+def fit_ica(epochs, n_interpolated, apply_av=True, method='infomax'):
+    """
+    Implements the ICA process used by FASTER.
     
+    Parameters
+    ----------
+    epochs:         mne.io.Epochs
+                    The epoched data. Preferably returned by mnefaster.find_bad_epochs().
+    n_interpolated: int
+                    The number of interpolated channels in the data.
+    apply_ref:      boolean
+                    Whether to apply an average reference projection. Defaults to True.
+    method:         string
+                    ICA method to use. Passed to mne.preprocessing.ICA.
+    
+    Returns
+    -------
+    epochs: mne.io.Epochs
+            The epoched data (modified or unmodified).
+    ica:    mne.preprocessing.ICA
+            The ICA applied on 'epochs'.
+    """
     # Getting the names of EEG channels
     eeg_chs = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, eeg=True)]
     # Getting the names of misc channels
     misc_chs = [epochs.info['ch_names'][i] for i in mne.pick_types(epochs.info, meg=False, misc=True)]
     
     # Setting average as reference if epochs is still Fz-referenced (if chosen)
-    if reset_ref == True:
+    if apply_av:
         epochs.load_data()
         epochs, _ = mne.io.set_eeg_reference(epochs, eeg_chs)
         
@@ -423,8 +511,35 @@ def fit_ica(epochs, n_interpolated, ref_ch='E11', method='infomax', reset_ref=Tr
 
 ### Finding bad components (Stage III.) ###
 
-def find_bad_components(epochs, ica, params=['eog_corr','spatial_kurt','mean_slope','hurst','median_grad'], crit_z=3, subtract=True):
+def find_bad_components(epochs, ica, params=['eog_corr','spatial_kurt','mean_slope','hurst','median_grad'], crit_z=3.0, subtract=True):
+    """
+    Implements the third stage of FASTER: finds the component outliers of the ICA fitted on the epoched data.
     
+    Parameters
+    ----------
+    epochs:     mne.io.Epochs
+                The epoched data returned by mnefaster.fit_ica().
+    ica:        mne.preprocessing.ICA
+                The ICA object returned by mnefaster.fit_ica().
+    params:     list
+                The parameters to use. Default is to use them all.
+                    'eog_corr':     The maximum correlation coefficient with misc channels describing a given component (Parameter 6.)
+                    'spatial_kurt': The kurtosis of the spatial information in a given component (Parameter 7.)
+                    'mean_slope':   The mean slope in the frequency band describing a given component (Parameter 8.)
+                    'hurst':        The Hurst-exponent describing a given component (Parameter 9.)
+                    'median_grad':  The median gradient describing a given component (Parameter 10.)
+    crit_z:     float
+                The critical z-score to use when determining outliers. Defaults to 3.0.
+    subtract:   boolean
+                Whether to subtract components marked as outliers from epoched data. Defaults to True.
+    
+    Returns
+    -------
+    epochs: mne.io.Epochs
+            The epoched data (modified or unmodified).
+    bads:   list
+            The indices of ICA components marked as outliers.
+    """
     # Getting requested parameters
     funcs = []
     if 'eog_corr' in params:
@@ -490,8 +605,32 @@ def find_bad_components(epochs, ica, params=['eog_corr','spatial_kurt','mean_slo
 
 ### Finding bad channels in single epochs (Stage IV.) ###
 
-def find_bad_channels_in_epochs(epochs, params=['var','median_grad','ampl','dev'], crit_z=3, interpolate=True):
+def find_bad_channels_in_epochs(epochs, params=['var','median_grad','ampl','dev'], crit_z=3.0, interpolate=True):
+    """
+    Implements the fourth stage of FASTER: finds the channel outliers in single epochs.
     
+    Parameters
+    ----------
+    epochs:     mne.io.Epochs
+                The epoched data. Preferably returned by mnefaster.find_bad_components().
+    params:     list
+                The parameters to use. Default is to use them all.
+                    'var':          The variance describing a given channel (Parameter 11.)
+                    'median_grad':  The median gradient describing a given channel (Parameter 12.)
+                    'ampl':         The maximum amplitude describing a given channel (Parameter 13.)
+                    'dev':          The absolute deviation describing a given channel (Parameter 14.)
+    crit_z:     float
+                The critical z-score to use when determining outliers. Defaults to 3.0.
+    interpolate:boolean
+                Whether to interpolate channels marked as outliers in single epochs. Defaults to True.
+    
+    Returns
+    -------
+    epochs: mne.io.Evoked
+            The evoked data (modified or unmodified).
+    bads:   list of lists
+            The labels of channels marked as outliers in single epochs.
+    """
     # Getting requested parameters
     funcs = []
     if 'var' in params:
